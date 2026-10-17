@@ -1,0 +1,8 @@
+.env
+вариант.xlsx
+.DS_Store
+superset/superset_home/
+evidence/*.png
+evidence/*.jpg
+*.log
+__pycache__/

@@ -1,0 +1,5 @@
+format,compression,bronze_write_seconds,bronze_size_bytes,q3_query_median_seconds,q3_rows,scale
+PARQUET,GZIP,7.283,48044903,1.182,10,sf1
+PARQUET,ZSTD,4.143,47659810,1.111,10,sf1
+ORC,GZIP,4.809,49947592,1.257,10,sf1
+ORC,ZSTD,4.321,53307427,1.154,10,sf1

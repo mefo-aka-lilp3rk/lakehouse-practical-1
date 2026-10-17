@@ -1,0 +1,151 @@
+name: practical-lakehouse
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: lakehouse-postgres
+    environment:
+      POSTGRES_DB: lakekeeper
+      POSTGRES_USER: lakekeeper
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-postgres-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakekeeper -d lakekeeper"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  object-store:
+    image: pgsty/silo:RELEASE.2026-09-03T13-18-01Z
+    container_name: lakehouse-object-store
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-lakehouse-admin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-local-s3-password-123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - object_store_data:/data
+    restart: unless-stopped
+
+  object-store-init:
+    image: pgsty/silo:RELEASE.2026-09-03T13-18-01Z
+    container_name: lakehouse-object-store-init
+    depends_on:
+      object-store:
+        condition: service_started
+    entrypoint: ["/bin/sh", "/config/init-object-store.sh"]
+    volumes:
+      - ./scripts/init-object-store.sh:/config/init-object-store.sh:ro
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-lakehouse-admin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-local-s3-password-123}
+    restart: "no"
+
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:v0.13.6
+    container_name: lakehouse-lakekeeper-migrate
+    command: ["migrate"]
+    environment: &lakekeeper_env
+      LAKEKEEPER__PG_ENCRYPTION_KEY: local-development-encryption-key-32-bytes
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://lakekeeper:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://lakekeeper:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/lakekeeper
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:v0.13.6
+    container_name: lakehouse-lakekeeper
+    command: ["serve"]
+    environment: *lakekeeper_env
+    ports:
+      - "8181:8181"
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+      object-store-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  lakekeeper-init:
+    image: curlimages/curl:8.16.0
+    container_name: lakehouse-lakekeeper-init
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/config/init-lakekeeper.sh"]
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-lakehouse-admin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-local-s3-password-123}
+    volumes:
+      - ./scripts/init-lakekeeper.sh:/config/init-lakekeeper.sh:ro
+      - ./lakekeeper/create-warehouse.json:/config/create-warehouse.json:ro
+    restart: "no"
+
+  trino:
+    image: trinodb/trino:484
+    container_name: lakehouse-trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/config.properties:/etc/trino/config.properties:ro
+      - ./trino/node.properties:/etc/trino/node.properties:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino/catalog:/etc/trino/catalog:ro
+    depends_on:
+      lakekeeper-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/status >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  superset:
+    build: ./superset
+    container_name: lakehouse-superset
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-replace-with-a-long-random-local-secret}
+      SUPERSET_ADMIN_USERNAME: admin
+      SUPERSET_ADMIN_FIRSTNAME: Nikita
+      SUPERSET_ADMIN_LASTNAME: Vdovin
+      SUPERSET_ADMIN_EMAIL: nikita@example.local
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-local-superset-password}
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        superset db upgrade &&
+        (superset fab create-admin
+        --username "$${SUPERSET_ADMIN_USERNAME}"
+        --firstname "$${SUPERSET_ADMIN_FIRSTNAME}"
+        --lastname "$${SUPERSET_ADMIN_LASTNAME}"
+        --email "$${SUPERSET_ADMIN_EMAIL}"
+        --password "$${SUPERSET_ADMIN_PASSWORD}" || true) &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088 --with-threads
+    depends_on:
+      trino:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  object_store_data:
+  superset_home:
