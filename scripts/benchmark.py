@@ -114,7 +114,7 @@ def main() -> None:
             print(results[-1])
 
     with OUT.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=results[0].keys())
+        writer = csv.DictWriter(stream, fieldnames=results[0].keys(), lineterminator="\n")
         writer.writeheader()
         writer.writerows(results)
     print(f"Saved benchmark results to {OUT}")
