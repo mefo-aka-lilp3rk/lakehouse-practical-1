@@ -15,9 +15,11 @@
 - `lakekeeper/` — настройки Iceberg warehouse.
 - `sql/00–04` — создание схем и поток Bronze → Silver → Gold, проверки и размеры файлов.
 - `sql/05–06` — изолированные демонстрации schema evolution и восстановления Iceberg snapshot.
+- `scripts/demo_time_travel.py` — автоматический тест чтения версии и возврата snapshot на отдельной demo-таблице.
 - `scripts/run_pipeline.sh` — последовательный запуск SQL конвейера.
 - `scripts/verify_q3.py` — сверка Gold с исходным запросом TPC-H Q3.
 - `scripts/benchmark.py` — замеры PARQUET/ORC и GZIP/ZSTD, объёма файлов и времени Q3.
+- `scripts/setup_superset_dashboard.py` — регистрация Gold-витрины, таблицы и дашборда в Superset.
 - `report.md` — отчёт с методикой, результатами и выводами.
 
 ## Требования
@@ -57,7 +59,7 @@ python3 scripts/benchmark.py
 
 Таблица результатов появится в `benchmark/results.csv`. Скрипт повторяет каждую агрегацию трижды после прогрева, сравнивает строки результата для всех конфигураций и сохраняет медианное время. Для сопоставимости запускайте на одном компьютере, при одинаковом масштабе и без других тяжёлых процессов.
 
-### Superset и Bronze
+### Superset: Bronze и Gold
 
 ```bash
 docker compose up -d --build superset
@@ -71,16 +73,24 @@ trino://admin@trino:8080/iceberg/bronze
 
 Создайте dataset из `bronze.customer`, `bronze.orders` или `bronze.lineitem`. Так Superset читает именно Bronze через Trino; BI-сервис не получает прямого доступа к файлам object store.
 
+В SQL Lab проверьте Bronze запросом `SELECT custkey, mktsegment FROM bronze.customer ORDER BY custkey LIMIT 5`. Чтобы создать дашборд поверх итоговой витрины Gold, выполните:
+
+```bash
+python3 scripts/setup_superset_dashboard.py
+```
+
+Скрипт использует пароль администратора из переменной `SUPERSET_ADMIN_PASSWORD`, файла `.env` или стандартное локальное значение из Compose. Он создаёт dataset `gold.q3_shipping_priority`, табличную визуализацию и дашборд `TPC-H Q3 — Gold`; повторный запуск не создаёт дубликаты. Дашборд доступен по адресу `http://localhost:8088/superset/dashboard/1/` (ID может отличаться, скрипт печатает фактическую ссылку).
+
 ### Schema evolution и time travel
 
 После основного конвейера выполните:
 
 ```bash
 python3 scripts/run_sql.py sql/05_schema_evolution.sql
-python3 scripts/run_sql.py sql/06_time_travel.sql
+python3 scripts/demo_time_travel.py
 ```
 
-В `sql/06_time_travel.sql` скопируйте ID исходного snapshot из вывода таблицы `$snapshots`, подставьте его вместо `<snapshot_id_before_change>` в примере и выполните сначала запрос `FOR VERSION AS OF`. Для фактического возврата используйте `ALTER TABLE ... EXECUTE rollback_to_snapshot(...)`. Демонстрационные таблицы отделены от основных таблиц Silver.
+Скрипт time travel автоматически создаёт отдельную таблицу на 20 строк, сохраняет ID её снимка, добавляет 5 строк, читает прежнюю версию через `FOR VERSION AS OF`, затем выполняет `ALTER TABLE ... EXECUTE rollback_to_snapshot(...)` и проверяет возврат к 20 строкам. При повторном запуске он удаляет и заново создаёт только `silver.time_travel_demo`; основные таблицы Silver остаются нетронутыми. `sql/06_time_travel.sql` содержит эквивалентные SQL-команды для ручного пошагового просмотра.
 
 ## Модель данных
 
